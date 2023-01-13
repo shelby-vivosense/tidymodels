@@ -1,0 +1,213 @@
+---
+title: "Part 1: Build a model"
+format: 
+  html:
+    theme: darkly
+editor: source
+---
+
+In this document, I follow the tutorial located at [tidymodels.org/start/models/](https://www.tidymodels.org/start/models/), which is focused on the basics of model fitting with `tidymodels`.
+
+## Setup
+
+```{r include = FALSE}
+
+# set global chunk options
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+
+```
+
+```{r}
+
+library(tidymodels)  # for the parsnip package, along with the rest of tidymodels
+library(readr)       # for importing data
+library(broom.mixed) # for converting bayesian models to tidy tibbles
+library(dotwhisker)  # for visualizing regression results
+
+```
+
+## Load data
+
+[This dataset](https://link.springer.com/article/10.1007/BF00349318) includes metrics on how three different feeding regimes affect sea urchin size over time. The variable `food_regime` refers to the experimental feeding regime group, `initial_volume` to sea urchin size at the start of the experiment, and `width` to suture width at the end of the experiment:
+
+```{r}
+
+urchins <- read_csv('https://tidymodels.org/start/models/urchins.csv',
+                    show_col_types = FALSE) %>%
+  setNames(c('food_regime', 'initial_volume', 'width')) %>%
+  mutate(food_regime = factor(food_regime, 
+                              levels = c('Initial', 'Low', 'High')))
+  
+urchins %>% head(5)
+
+```
+A quick exploration of the data indicates that the effect of initial volume on width at the end of the experiment might depend on feeding regime:
+
+```{r}
+
+ggplot(data = urchins,
+       aes(x = initial_volume,
+           y = width,
+           group = food_regime,
+           col = food_regime)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  scale_color_viridis_d()
+
+```
+## Construct and fit model
+
+We want to test whether the volume-width relationship depends on food regime (i.e. a volume-food regime interaction):
+
+```{r, eval = FALSE}
+
+width ~ initial_volume * food_regime
+
+```
+
+Since we have a continuous and categorical predictor, as well as a continuous outcome, we can use linear regression.
+
+In `tidymodels` we think about several steps:
+
+- Specify the type of model (here, linear regression)
+- Identify a method to fit/train the model, known as the model engine (here, `lm`, indicating OLS; see all possible engines [here](https://parsnip.tidymodels.org/reference/linear_reg.html))
+- Fit the model using the `fit()` function, specifying the model formula
+
+```{r}
+
+# save model object using default engine (lm)
+lm_mod <- linear_reg()
+
+# fit the model
+lm_fit <- 
+  lm_mod %>%
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+# show model fit summary
+tidy(lm_fit, conf.int = TRUE)
+
+```
+
+We can visualize the coefficient estimates using the `dotwhisker` package:
+
+```{r}
+
+tidy(lm_fit) %>%
+  dwplot(dot_args = list(size = 2, 
+                         color = 'black'),
+         whisker_args = list(color = 'black'),
+         vline = geom_vline(xintercept = 0, 
+                            colour = 'grey50', linetype = 2))
+
+```
+
+## Generate predictions
+
+Next, we will use our model fit to generate predictions about new data. For instance, we might want to predict width at the end of the experiment for urchins with initial volume of 20, for each feeding regime:
+
+```{r}
+
+new_urchins <- expand.grid(initial_volume = 20,
+                           food_regime = c('Initial', 'Low', 'High'))
+
+new_urchins
+
+```
+We use `predict()` to make model predictions for the new data. The `predict()` function yields a tibble of results with standardized column names:
+
+```{r}
+
+# generate model predictions
+mean_pred <- predict(lm_fit, 
+                     new_data = new_urchins)
+
+# generate CIs around model predictions
+confint_pred <- predict(lm_fit,
+                        new_data = new_urchins,
+                        type = 'conf_int')
+
+# join all predictions
+data_pred <- 
+  new_urchins %>%
+  bind_cols(mean_pred) %>%
+  bind_cols(confint_pred)
+
+data_pred
+
+```
+
+```{r}
+
+ggplot(data = data_pred,
+       aes(x = food_regime,
+           y = .pred,
+           ymin = .pred_lower,
+           ymax = .pred_upper)) +
+  geom_point() +
+  geom_errorbar(width = 0.2) +
+  labs(x = 'Feeding regime', y = 'Predicted urchin size') +
+  ggtitle('OLS model')
+
+```
+## Fit model with a different engine
+
+If we want, for instance, to fit our model using a Bayesian approach instead, we can use a different engine. 
+
+For Bayesian analysis in particular, we need to specify a prior distribution for each parameter; in this case, we set the priors to be wide using a Cauchy distribution:
+
+```{r}
+
+# set prior distribution (Cauchy)
+prior_dist <- rstanarm::student_t(df = 1)
+
+```
+
+`linear_reg()` has a `stan` engine, so we can specify and fit the model accordingly, using the priors as an argument:
+
+```{r}
+
+set.seed(123)
+
+# specify model
+bayes_mod <- 
+  linear_reg() %>%
+  set_engine('stan',
+             prior_intercept = prior_dist,
+             prior = prior_dist)
+
+# fit model
+bayes_fit <- 
+  bayes_mod %>%
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+# show model fit summary
+tidy(bayes_fit, conf.int = TRUE)
+
+```
+
+As before, we can make model predictions:
+
+```{r}
+
+bayes_pred <-
+  new_urchins %>%
+  bind_cols(
+    predict(bayes_fit, new_data = new_urchins)
+    ) %>%
+  bind_cols(
+    predict(bayes_fit, new_data = new_urchins, type = 'conf_int')
+    )
+
+ggplot(data = bayes_pred,
+       aes(x = food_regime,
+           y = .pred,
+           ymin = .pred_lower,
+           ymax = .pred_upper)) +
+  geom_point() +
+  geom_errorbar(width = 0.2) +
+  labs(x = 'Feeding regime', y = 'Predicted urchin size') +
+  ggtitle('Bayesian model with t(1) prior distribution')
+
+```
